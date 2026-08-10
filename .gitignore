@@ -1,0 +1,45 @@
+# Environments
+.venv/
+venv/
+__pycache__/
+*.pyc
+
+# Audio data — NEVER commit. ~10 GB, lives outside the repo anyway
+# (config.yaml points paths.data at /home/karma/biodcase-data).
+data/
+*.wav
+
+# Cache is ENTIRELY regenerable, so none of it belongs in git:
+#   repo_files.json / listings/  -> re-fetchable from the HF API
+#   manifest_*.csv               -> deterministic given sampling.seed in config
+#   metadata/*.csv               -> downloaded from the dataset repo
+#   download_errors_*.txt        -> transient run logs
+# NOTE: a bare `cache/*.csv` would NOT cover cache/metadata/*.csv — gitignore
+# globs only match one level. Hence ignoring the whole directory.
+cache/
+!cache/.gitkeep
+
+# Results: keep small tables and figures, drop bulky intermediates
+results/*.parquet
+!results/*.csv
+!results/*.png
+
+# Model / detector weights
+*.tflite
+*.pt
+*.h5
+*.onnx
+
+# Personal working notes — schedule, marking-scheme strategy, admin todos.
+NOTES.local.md
+*.local.md
+
+# Internal design analysis. Kept local; its content is reworked into the
+# technical report (a required deliverable) rather than shipped as-is.
+PLAN.md
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

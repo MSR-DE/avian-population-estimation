@@ -1,0 +1,82 @@
+# Central config. Every script reads this — no hard-coded paths or magic numbers.
+repo_id: Emreargin/BioDCASE2026_Bird_Counting
+
+# ---- Audio facts, MEASURED not assumed ---------------------------------
+# The challenge brief says "3-second WAV recordings sampled at 48 kHz".
+# Verified with src/probe_audio.py on real files: the clips are 2.75 s and
+# STEREO. Check: 2.75 * 48000 * 2ch * 2 bytes + 44 = 528,044 = observed size.
+# Two consequences:
+#   1. Per-file rates normalise by 2.75 s, not 3 s (a 9% error otherwise).
+#   2. There is a second channel the brief never mentions. If the two mics are
+#      spaced, inter-channel delay carries SPATIAL information — see
+#      src/probe_stereo.py.
+audio:
+  clip_seconds: 2.75
+  sample_rate: 48000
+  channels: 2
+
+paths:
+  data: /home/karma/biodcase-data     # absolute path, NOT under /mnt/c
+  cache: cache          # repo listings, detections parquet
+  results: results      # features, model outputs, figures
+
+# ---- Sampling ----------------------------------------------------------
+# We do NOT download all ~270 GB. We sample CONTIGUOUS TIME WINDOWS, not
+# individual files, so that bout / inter-call-gap features remain valid.
+# See PLAN.md section 1, Fact 2.
+sampling:
+  # 10-minute blocks. Chosen over 30 min because dense aviaries (dev_aviary_4,
+  # 36k files) hit the file budget after only ~12 half-hour windows, which
+  # cannot cover 18 day x time-of-day cells. At 600 s they need ~33 windows and
+  # reach full coverage. Trade-off: shorter blocks truncate long inter-BOUT
+  # intervals, so compute gap statistics WITHIN a window only, never across
+  # a window boundary.
+  window_seconds: 600
+  max_files_per_aviary: 3000  # tune down if disk or bandwidth is tight
+  seed: 17
+  # Spread windows across the diel cycle so we don't oversample dawn chorus.
+  stratify_by_hour_bucket: true
+  hour_buckets: 6             # 6 x 4-hour buckets per day
+
+splits:
+  dev:
+    - dev_aviary_1
+    - dev_aviary_2
+    - dev_aviary_3
+    - dev_aviary_4
+    - dev_aviary_5
+    - dev_aviary_6
+  eval:
+    - eval_aviary_1
+    - eval_aviary_2
+    - eval_aviary_3
+    - eval_aviary_4
+    - eval_aviary_5
+    - eval_aviary_6
+    - eval_aviary_7
+    - eval_aviary_8
+    - eval_aviary_9
+    - eval_aviary_10
+
+# Aviaries with byte-identical ground truth. Used to group cross-validation
+# folds so we never validate on a physical aviary we calibrated on.
+# See PLAN.md section 1, Fact 3.
+duplicate_groups:
+  - [dev_aviary_5, dev_aviary_6]
+  - [dev_aviary_1, eval_aviary_1]
+  - [dev_aviary_3, eval_aviary_2]
+  - [eval_aviary_6, eval_aviary_7]
+
+targets:
+  main:
+    - Greater flamingo
+    - Red-billed quelea
+    - Hadada ibis
+  optional:
+    - Pied avocet
+
+download:
+  workers: 3          # keep LOW. 8 workers + no backoff caused 16,220 HTTP 429s.
+                      # Authenticated + 3 workers is far faster end-to-end than
+                      # 8 workers that get rate-limited into failure.
+  max_retries: 6      # with exponential backoff, so 6 attempts spans ~4 min

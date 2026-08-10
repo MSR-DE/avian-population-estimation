@@ -1,0 +1,19 @@
+aviary_id,common_name,scientific_name,count,is_target,split
+dev_aviary_1,Red-billed quelea,Quelea quelea,153,1,dev
+dev_aviary_2,Greater flamingo,Phoenicopterus roseus,107,1,dev
+dev_aviary_2,Hadada ibis,Bostrychia hagedash,6,1,dev
+dev_aviary_3,Red-billed quelea,Quelea quelea,61,1,dev
+dev_aviary_4,Hadada ibis,Bostrychia hagedash,4,1,dev
+dev_aviary_4,Greater flamingo,Phoenicopterus roseus,161,1,dev
+dev_aviary_5,Greater flamingo,Phoenicopterus roseus,52,1,dev
+dev_aviary_6,Greater flamingo,Phoenicopterus roseus,52,1,dev
+eval_aviary_1,Red-billed quelea,Quelea quelea,153,1,eval
+eval_aviary_2,Red-billed quelea,Quelea quelea,61,1,eval
+eval_aviary_3,Pied avocet,Recurvirostra avosetta,9,2,eval
+eval_aviary_4,Greater flamingo,Phoenicopterus roseus,11,1,eval
+eval_aviary_5,Pied avocet,Recurvirostra avosetta,15,2,eval
+eval_aviary_6,Hadada ibis,Bostrychia hagedash,4,1,eval
+eval_aviary_7,Hadada ibis,Bostrychia hagedash,4,1,eval
+eval_aviary_8,Greater flamingo,Phoenicopterus roseus,195,1,eval
+eval_aviary_9,Pied avocet,Recurvirostra avosetta,2,2,eval
+eval_aviary_10,Pied avocet,Recurvirostra avosetta,17,2,eval
