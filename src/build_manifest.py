@@ -1,9 +1,8 @@
 ## Stage 0 — decide WHICH files to download, before downloading anything.
 ##
 ## THE PROBLEM
-## The full dataset is ~270 GB (528 KB/file x ~520,000 files). You have 3 days.
-## Downloading all of it would eat the entire deadline. So we sample.
-##
+## The full dataset is ~270 GB (528 KB/file x ~520,000 files).
+
 ## WHY SAMPLING IS ALLOWED (this is the bit to understand)
 ## The thing we're measuring is a RATE — "detections per file". A rate is
 ## recoverable from a random sample: if 4% of a sample of files contain a
@@ -41,63 +40,28 @@ from huggingface_hub import HfApi
 from .common import Clip, load_config, parse_repo_path, resolve_dir
 
 
-def list_aviary_files(repo_id: str, aviary: str, cache_dir: Path) -> list[str]:
-    """Get the .wav paths for ONE aviary. Cached per aviary.
+def list_repo_files(repo_id: str, cache_dir: Path) -> list[str]:
+    """Get every file path in the HF dataset repo. Cached to disk.
 
-    WHY PER-AVIARY instead of one call for the whole repo:
-    The repo holds ~520,000 files, but `--split dev` only needs the ~141,000
-    in the six dev aviaries. Listing everything meant waiting on ~4x more
-    paginated API requests than necessary — which on an unauthenticated
-    connection is the difference between minutes and many minutes.
+    This is ~520,000 strings. It takes a minute or two the first time and is
+    instant afterwards, because we save the result to cache/repo_files.json.
 
-    Caching per aviary also makes this RESUMABLE. If the listing dies or you
-    Ctrl+C on aviary 4, aviaries 1-3 are already saved and skipped on re-run.
-
-    NOTE: this fetches only FILENAMES, not audio. A few MB of text total.
+    NOTE: this only downloads the LIST of filenames, not the audio. It's a few
+    MB of text. Nothing expensive happens in this function.
     """
-    listing_dir = cache_dir / "listings"
-    listing_dir.mkdir(parents=True, exist_ok=True)
-    cache = listing_dir / f"{aviary}.json"
+    cache = cache_dir / "repo_files.json"
 
-    # 1) already listed? read it straight back
+    # 1) already fetched? just read it back
     if cache.exists():
-        paths = json.loads(cache.read_text())
-        print(f"  {aviary}: {len(paths)} files (cached)")
-        return paths
+        return json.loads(cache.read_text())
 
-    # 2) MIGRATION: an earlier version of this script cached one big listing of
-    ##   the whole repo. If that file is still around, slice this aviary out of
-    ##   it instead of hitting the API again — saves re-listing 520k paths.
-    legacy = cache_dir / "repo_files.json"
-    if legacy.exists():
-        allp = json.loads(legacy.read_text())
-        paths = [p for p in allp if p.startswith(aviary + "/") and p.endswith(".wav")]
-        if paths:
-            cache.write_text(json.dumps(paths))
-            print(f"  {aviary}: {len(paths)} files (from legacy repo_files.json)")
-            return paths
-
-    # 3) otherwise walk just this aviary's subtree.
-    ##   recursive=True descends into the chunk_NNN/ subfolders for us.
+    # 2) otherwise ask the Hugging Face API for the full listing
     api = HfApi()
-    paths: list[str] = []
-    print(f"  {aviary}: listing...", end="", flush=True)
-    for item in api.list_repo_tree(
-        repo_id=repo_id, path_in_repo=aviary, recursive=True, repo_type="dataset"
-    ):
-        ## the tree yields both files and folders; folders have no .size and we
-        ## only want .wav anyway, so filter on the extension.
-        p = getattr(item, "path", None)
-        if p and p.endswith(".wav"):
-            paths.append(p)
-            ## heartbeat so a slow listing never looks frozen
-            if len(paths) % 5000 == 0:
-                print(f" {len(paths)}", end="", flush=True)
+    files = api.list_repo_files(repo_id=repo_id, repo_type="dataset")
 
-    # 3) save so this cost is paid exactly once
-    cache.write_text(json.dumps(paths))
-    print(f" done ({len(paths)} files)")
-    return paths
+    # 3) save so we never pay this cost again
+    cache.write_text(json.dumps(files))
+    return files
 
 
 def window_key(clip: Clip, window_seconds: int) -> tuple[int, int]:
@@ -161,21 +125,11 @@ def sample_aviary(
         for v in by_bucket.values():
             rng.shuffle(v)
 
-        # 2d) ROUND-ROBIN: walk the cells in a loop, taking one window from each
-        #     per pass. This interleaves them: cell0, cell1, cell2, ... then
-        #     back to cell0, so every cell gets one window before any gets two.
-        ##
-        ## The shuffle on the next line is NOT cosmetic — it fixes a real bias.
-        ## If we walk cells in sorted order they come out day-major:
-        ##     (d1,b0) (d1,b1) ... (d1,b5) (d2,b0) ...
-        ## A dense aviary only needs ~12 windows to hit its file budget, so the
-        ## loop would stop partway through day 2 and NEVER SAMPLE DAY 3.
-        ## Observed for real: dev_aviary_4 has 3 recording days but the sample
-        ## contained only 2. Shuffling makes the truncation land uniformly
-        ## across days and time-of-day instead of always chopping off the end.
+        # 2d) ROUND-ROBIN: walk the buckets in a loop, taking one window from
+        #     each pass. This interleaves them: bucket0, bucket1, bucket2, ...
+        #     then back to bucket0. Result is a spread-out ordering.
         ordered: list[tuple[int, int]] = []
         bucket_names = sorted(by_bucket.keys())
-        rng.shuffle(bucket_names)
         i = 0
         while any(by_bucket[b] for b in bucket_names):
             b = bucket_names[i % len(bucket_names)]   ## % wraps around the list
@@ -223,26 +177,31 @@ def main() -> None:
     s = cfg["sampling"]
     rng = random.Random(s["seed"])
 
-    # 3) work out which aviaries we actually need to list
-    splits = ["dev", "eval"] if args.split == "all" else [args.split]
-    wanted = [a for split in splits for a in cfg["splits"][split]]
-    print(f"Listing {len(wanted)} aviaries from {cfg['repo_id']} (cached per aviary)...")
+    # 3) get the full file listing (names only — no audio yet)
+    print(f"Listing files in {cfg['repo_id']} (cached after first run)...")
+    files = list_repo_files(cfg["repo_id"], cache_dir)
+    print(f"  {len(files)} paths in repo")
 
-    # 4) list + sample one aviary at a time.
-    ##   Doing both in the same loop means we never hold all 141k paths in
-    ##   memory at once, and you see progress aviary by aviary.
+    # 4) parse each path into a Clip and group by aviary.
+    ##   parse_repo_path returns None for README/metadata files, so the
+    ##   `if c is not None` quietly filters those out.
+    by_aviary: dict[str, list[Clip]] = defaultdict(list)
+    for p in files:
+        c = parse_repo_path(p)
+        if c is not None:
+            by_aviary[c.aviary].append(c)
+
+    # 5) sample each aviary in the requested split(s)
+    splits = ["dev", "eval"] if args.split == "all" else [args.split]
     rows = []
     for split in splits:
         for aviary in cfg["splits"][split]:
-            paths = list_aviary_files(cfg["repo_id"], aviary, cache_dir)
-
-            ## parse_repo_path returns None for anything that isn't an audio
-            ## file, so this quietly drops stray non-.wav entries.
-            clips = [c for c in (parse_repo_path(p) for p in paths) if c is not None]
+            clips = by_aviary.get(aviary, [])
             if not clips:
-                print(f"  !! {aviary}: no parseable audio files — check the listing")
+                print(f"  !! {aviary}: no files found — check the listing")
                 continue
 
+            print(f"  {aviary}: {len(clips)} files total")
             picked = sample_aviary(
                 clips,
                 window_seconds=s["window_seconds"],
