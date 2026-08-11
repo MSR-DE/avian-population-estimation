@@ -1,14 +1,16 @@
 ## Stage 0 — decide WHICH files to download, before downloading anything.
 ##
 ## THE PROBLEM
-## The full dataset is ~270 GB (528 KB/file x ~520,000 files).
-
+## The full dataset is ~270 GB (528 KB - 1 MB per file x ~520,000 files). You
+## have 3 days. Downloading all of it would eat the entire deadline. So we
+## sample.
+##
 ## WHY SAMPLING IS ALLOWED (this is the bit to understand)
-## The thing we're measuring is a RATE — "detections per file". A rate is
-## recoverable from a random sample: if 4% of a sample of files contain a
-## flamingo call, roughly 4% of ALL files do too. If instead we needed a TOTAL
-## (e.g. total number of calls across the whole recording), sampling would
-## cost us much more.
+## The thing we're measuring is a RATE — "detections per second of audio". A
+## rate is recoverable from a random sample: if 4% of a sample of clips contain
+## a flamingo call, roughly 4% of ALL clips do too. If instead we needed a TOTAL
+## (e.g. total number of calls across the whole recording), sampling would cost
+## us much more.
 ## So the justification is statistical, not "the files were too big". Say it
 ## that way in the report — it's the difference between an excuse and an
 ## engineering decision.
@@ -19,7 +21,7 @@
 ## If we picked 3,000 files at random from an aviary, two "consecutive" files
 ## in our sample might be 40 minutes apart in reality — and every gap we
 ## measured would be an artifact of our own sampler, not the birds.
-## So: pick whole 30-minute WINDOWS and take every file inside them.
+## So: pick whole 10-minute WINDOWS and take every file inside them.
 ## Same number of bytes. Rate features unaffected. Bout features survive.
 ##
 ## Usage:
@@ -40,36 +42,71 @@ from huggingface_hub import HfApi
 from .common import Clip, load_config, parse_repo_path, resolve_dir
 
 
-def list_repo_files(repo_id: str, cache_dir: Path) -> list[str]:
-    """Get every file path in the HF dataset repo. Cached to disk.
+def list_aviary_files(repo_id: str, aviary: str, cache_dir: Path) -> list[str]:
+    """Get the .wav paths for ONE aviary. Cached per aviary.
 
-    This is ~520,000 strings. It takes a minute or two the first time and is
-    instant afterwards, because we save the result to cache/repo_files.json.
+    WHY PER-AVIARY instead of one call for the whole repo:
+    The repo holds ~520,000 files, but `--split dev` only needs the ~141,000
+    in the six dev aviaries. Listing everything meant waiting on ~4x more
+    paginated API requests than necessary — which on an unauthenticated
+    connection is the difference between minutes and many minutes.
 
-    NOTE: this only downloads the LIST of filenames, not the audio. It's a few
-    MB of text. Nothing expensive happens in this function.
+    Caching per aviary also makes this RESUMABLE. If the listing dies or you
+    Ctrl+C on aviary 4, aviaries 1-3 are already saved and skipped on re-run.
+
+    NOTE: this fetches only FILENAMES, not audio. A few MB of text total.
     """
-    cache = cache_dir / "repo_files.json"
+    listing_dir = cache_dir / "listings"
+    listing_dir.mkdir(parents=True, exist_ok=True)
+    cache = listing_dir / f"{aviary}.json"
 
-    # 1) already fetched? just read it back
+    # 1) already listed? read it straight back
     if cache.exists():
-        return json.loads(cache.read_text())
+        paths = json.loads(cache.read_text())
+        print(f"  {aviary}: {len(paths)} files (cached)")
+        return paths
 
-    # 2) otherwise ask the Hugging Face API for the full listing
+    # 2) MIGRATION: an earlier version of this script cached one big listing of
+    ##   the whole repo. If that file is still around, slice this aviary out of
+    ##   it instead of hitting the API again — saves re-listing 520k paths.
+    legacy = cache_dir / "repo_files.json"
+    if legacy.exists():
+        allp = json.loads(legacy.read_text())
+        paths = [p for p in allp if p.startswith(aviary + "/") and p.endswith(".wav")]
+        if paths:
+            cache.write_text(json.dumps(paths))
+            print(f"  {aviary}: {len(paths)} files (from legacy repo_files.json)")
+            return paths
+
+    # 3) otherwise walk just this aviary's subtree.
+    ##   recursive=True descends into the chunk_NNN/ subfolders for us.
     api = HfApi()
-    files = api.list_repo_files(repo_id=repo_id, repo_type="dataset")
+    paths = []
+    print(f"  {aviary}: listing...", end="", flush=True)
+    for item in api.list_repo_tree(
+        repo_id=repo_id, path_in_repo=aviary, recursive=True, repo_type="dataset"
+    ):
+        ## the tree yields both files and folders; folders have no .size and we
+        ## only want .wav anyway, so filter on the extension.
+        p = getattr(item, "path", None)
+        if p and p.endswith(".wav"):
+            paths.append(p)
+            ## heartbeat so a slow listing never looks frozen
+            if len(paths) % 5000 == 0:
+                print(f" {len(paths)}", end="", flush=True)
 
-    # 3) save so we never pay this cost again
-    cache.write_text(json.dumps(files))
-    return files
+    # 4) save so this cost is paid exactly once
+    cache.write_text(json.dumps(paths))
+    print(f" done ({len(paths)} files)")
+    return paths
 
 
 def window_key(clip: Clip, window_seconds: int) -> tuple[int, int]:
     """Which time-window does this clip belong to?
 
-    Integer division is doing the work: with window_seconds=1800 (30 min),
-    a clip at t=1750s -> 1750//1800 = 0  (first window)
-    a clip at t=1850s -> 1850//1800 = 1  (second window)
+    Integer division is doing the work: with window_seconds=600 (10 min),
+    a clip at t=550s -> 550//600 = 0  (first window)
+    a clip at t=650s -> 650//600 = 1  (second window)
 
     Returns (day, window_index) because window 0 of day 1 and window 0 of
     day 2 are different windows — the day has to be part of the key.
@@ -90,7 +127,7 @@ def sample_aviary(
     Returns the list of clips to download.
     """
 
-    # 1) BUCKET every clip into its 30-minute window.
+    # 1) BUCKET every clip into its time window.
     #    defaultdict(list) means we don't have to check "does this key exist
     #    yet" before appending — it creates the empty list automatically.
     windows: dict[tuple[int, int], list[Clip]] = defaultdict(list)
@@ -125,11 +162,22 @@ def sample_aviary(
         for v in by_bucket.values():
             rng.shuffle(v)
 
-        # 2d) ROUND-ROBIN: walk the buckets in a loop, taking one window from
-        #     each pass. This interleaves them: bucket0, bucket1, bucket2, ...
-        #     then back to bucket0. Result is a spread-out ordering.
+        # 2d) ROUND-ROBIN: walk the cells in a loop, taking one window from each
+        #     per pass. This interleaves them: cell0, cell1, cell2, ... then
+        #     back to cell0, so every cell gets one window before any gets two.
+        ##
+        ## The shuffle on the next line is NOT cosmetic — it fixes a real bias.
+        ## If we walk cells in sorted order they come out day-major:
+        ##     (d1,b0) (d1,b1) ... (d1,b5) (d2,b0) ...
+        ## A dense aviary only needs ~12 windows to hit its file budget, so the
+        ## loop would stop partway through day 2 and NEVER SAMPLE DAY 3.
+        ## Observed for real: dev_aviary_4 has 3 recording days but the sample
+        ## contained only 2. Shuffling makes the truncation land uniformly
+        ## across days and time-of-day instead of always chopping off the end.
+        ## Regression test: tests/test_sampling.py
         ordered: list[tuple[int, int]] = []
         bucket_names = sorted(by_bucket.keys())
+        rng.shuffle(bucket_names)
         i = 0
         while any(by_bucket[b] for b in bucket_names):
             b = bucket_names[i % len(bucket_names)]   ## % wraps around the list
@@ -170,38 +218,33 @@ def main() -> None:
 
     # 2) load settings and set up the random seed.
     ##   Seeding matters: it makes the file selection REPRODUCIBLE. Anyone can
-    ##   regenerate the identical 25 GB subset from config.yaml. That turns
+    ##   regenerate the identical subset from config.yaml. That turns
     ##   "I sampled the data" into a checkable claim.
     cfg = load_config(args.config)
     cache_dir = resolve_dir(cfg, "cache")
     s = cfg["sampling"]
     rng = random.Random(s["seed"])
 
-    # 3) get the full file listing (names only — no audio yet)
-    print(f"Listing files in {cfg['repo_id']} (cached after first run)...")
-    files = list_repo_files(cfg["repo_id"], cache_dir)
-    print(f"  {len(files)} paths in repo")
-
-    # 4) parse each path into a Clip and group by aviary.
-    ##   parse_repo_path returns None for README/metadata files, so the
-    ##   `if c is not None` quietly filters those out.
-    by_aviary: dict[str, list[Clip]] = defaultdict(list)
-    for p in files:
-        c = parse_repo_path(p)
-        if c is not None:
-            by_aviary[c.aviary].append(c)
-
-    # 5) sample each aviary in the requested split(s)
+    # 3) work out which aviaries we actually need to list
     splits = ["dev", "eval"] if args.split == "all" else [args.split]
+    wanted = [a for split in splits for a in cfg["splits"][split]]
+    print(f"Listing {len(wanted)} aviaries from {cfg['repo_id']} (cached per aviary)...")
+
+    # 4) list + sample one aviary at a time.
+    ##   Doing both in the same loop means we never hold all 141k paths in
+    ##   memory at once, and you see progress aviary by aviary.
     rows = []
     for split in splits:
         for aviary in cfg["splits"][split]:
-            clips = by_aviary.get(aviary, [])
+            paths = list_aviary_files(cfg["repo_id"], aviary, cache_dir)
+
+            ## parse_repo_path returns None for anything that isn't an audio
+            ## file, so this quietly drops stray non-.wav entries.
+            clips = [c for c in (parse_repo_path(p) for p in paths) if c is not None]
             if not clips:
-                print(f"  !! {aviary}: no files found — check the listing")
+                print(f"  !! {aviary}: no parseable audio files — check the listing")
                 continue
 
-            print(f"  {aviary}: {len(clips)} files total")
             picked = sample_aviary(
                 clips,
                 window_seconds=s["window_seconds"],
@@ -211,7 +254,7 @@ def main() -> None:
                 rng=rng,
             )
 
-            # 5a) flatten to rows for the CSV
+            # 4a) flatten to rows for the CSV
             for c in picked:
                 rows.append(
                     {
@@ -222,16 +265,16 @@ def main() -> None:
                         "t_sec": c.t_sec,
                         "abs_sec": c.abs_sec,          ## for ordering/gaps later
                         "window": window_key(c, s["window_seconds"])[1],
-                        "n_files_total_in_aviary": len(clips),  ## for sampling fraction
+                        "n_files_total_in_aviary": len(clips),  ## sampling fraction
                     }
                 )
 
-    # 6) write the manifest — this is the ONLY output. Still no audio downloaded.
+    # 5) write the manifest — this is the ONLY output. Still no audio downloaded.
     df = pd.DataFrame(rows).sort_values(["aviary", "day", "t_sec"])
     out = cache_dir / f"manifest_{args.split}.csv"
     df.to_csv(out, index=False)
 
-    # 7) report what fraction of each aviary we're taking.
+    # 6) report what fraction of each aviary we're taking.
     ##   Needed for two reasons: (a) to sanity-check we didn't accidentally
     ##   grab 2 files from one aviary and 3000 from another, and (b) to quote
     ##   honestly in the write-up.
@@ -243,10 +286,11 @@ def main() -> None:
     print("\nSampling fractions:")
     print(frac.to_string())
 
-    ## 528_044 is the observed bytes-per-file. Underscores are just digit
-    ## separators for readability — Python ignores them.
+    ## 528_044 bytes is the size of a 2.75 s clip; dev_aviary_2's 5.25 s clips
+    ## are 1,008,044, so this is a LOWER BOUND on the download size.
+    ## Underscores are digit separators — Python ignores them.
     est_gb = len(df) * 528_044 / 1e9
-    print(f"\nWrote {out}  ({len(df)} files, ~{est_gb:.1f} GB to download)")
+    print(f"\nWrote {out}  ({len(df)} files, >= ~{est_gb:.1f} GB to download)")
 
 
 if __name__ == "__main__":
