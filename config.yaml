@@ -10,10 +10,30 @@ repo_id: Emreargin/BioDCASE2026_Bird_Counting
 #   2. There is a second channel the brief never mentions. If the two mics are
 #      spaced, inter-channel delay carries SPATIAL information — see
 #      src/probe_stereo.py.
+# MEASURED per aviary with src/probe_audio.py (full scan of every file):
+#   dev_aviary_1,3,4,5 : 2.75 s   (528,044 bytes)
+#   dev_aviary_2       : 5.25 s (1,008,044 bytes)  <- 1.9x longer
+# Uniform WITHIN each aviary, different BETWEEN them.
+#
+# This is why features.py must express every rate as detections per SECOND,
+# never per file. dev_aviary_2 holds Greater flamingo=107 and Hadada ibis=6 —
+# two of the eight training points. Its clips are 1.9x longer, so an identical
+# population produces ~1.9x the per-file detections. Uncorrected, the model
+# would read that as more birds, biasing 25% of the training data one way.
+#
+# features.py derives duration PER FILE (frames/samplerate) rather than reading
+# these numbers, so an aviary with mixed durations cannot silently break it.
+# The values below are documentation and a sanity check, not the source of truth.
 audio:
-  clip_seconds: 2.75
   sample_rate: 48000
-  channels: 2
+  channels: 2               # dual mono — channels are bit-identical, use ch 0
+  clip_seconds_by_aviary:
+    dev_aviary_1: 2.75
+    dev_aviary_2: 5.25
+    dev_aviary_3: 2.75
+    dev_aviary_4: 2.75
+    dev_aviary_5: 2.75
+    dev_aviary_6: null      # not yet downloaded — verify before use
 
 paths:
   data: /home/karma/biodcase-data     # absolute path, NOT under /mnt/c

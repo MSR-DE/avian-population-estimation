@@ -1,0 +1,4 @@
+species,feature,model,cv_mae
+Greater flamingo,occ_per_sec_hi,loglog,33.77
+Hadada ibis,occ_per_sec,mean,2.0
+Red-billed quelea,rate_hi,scale,25.45
