@@ -38,6 +38,10 @@ NOTES.local.md
 # technical report (a required deliverable) rather than shipped as-is.
 PLAN.md
 
+# Personal study material — written to me, not to a reviewer.
+INTERVIEW-PREP.md
+FOUNDATIONS.md
+
 # Run logs — regenerable, and detect.log is ~100k lines of per-file output
 *.log
 nohup.out
