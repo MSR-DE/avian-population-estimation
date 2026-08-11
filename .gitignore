@@ -38,6 +38,10 @@ NOTES.local.md
 # technical report (a required deliverable) rather than shipped as-is.
 PLAN.md
 
+# Run logs — regenerable, and detect.log is ~100k lines of per-file output
+*.log
+nohup.out
+
 # OS / editor
 .DS_Store
 Thumbs.db
